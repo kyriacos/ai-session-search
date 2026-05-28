@@ -22,6 +22,47 @@
 
 set -uo pipefail
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cat <<'EOF'
+ass — AI Session Search
+
+Fuzzy-search chat history across Claude Code and Cursor from the terminal.
+
+USAGE
+  ass                  open interactive session picker
+  ass --help           show this help
+
+KEYS (in picker)
+  Enter                print session identifier to stdout
+  F1                   Claude Code sessions only
+  F2                   Cursor sessions only
+  F3                   all sessions (reset filter)
+  F5                   resume selected session
+  Ctrl-C               cancel
+
+RESUME BEHAVIOUR (F5)
+  Claude Code  →  claude --resume <uuid>
+  Cursor       →  cursor --reuse-window <workspace-path>
+
+OUTPUT (on Enter)
+  Claude  →  /path/to/session.jsonl
+  Cursor  →  cursor:<composerId>:<workspacePath>
+
+ENVIRONMENT
+  CLAUDE_PROJECTS_DIR     override ~/.claude/projects
+  CURSOR_GLOBALSTATE_DB   override platform-default Cursor DB path
+
+REQUIREMENTS
+  fzf >= 0.45   brew install fzf
+  bat           brew install bat
+  python3       ships with macOS / most Linux
+
+MORE INFO
+  https://github.com/kyriacos/ai-session-search
+EOF
+  exit 0
+fi
+
 SELF="$(realpath "$0" 2>/dev/null || echo "$0")"
 CLAUDE_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 
