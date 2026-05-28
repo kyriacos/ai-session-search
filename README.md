@@ -20,8 +20,19 @@ Fuzzy-search your local AI chat history across **Claude Code** and **Cursor** fr
 
 ## Installation
 
+**One-liner (latest release, no git required):**
+
 ```bash
-# 1. Copy the script somewhere on your PATH
+curl -fsSL https://github.com/kyriacos/ai-session-search/releases/latest/download/ass \
+  -o ~/.local/bin/ass && chmod +x ~/.local/bin/ass
+```
+
+Make sure `~/.local/bin` is on your `PATH` — add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc if needed.
+
+**From source:**
+
+```bash
+# Copy the script somewhere on your PATH
 cp ass ~/.local/bin/ass
 chmod +x ~/.local/bin/ass
 
