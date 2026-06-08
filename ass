@@ -438,6 +438,7 @@ trap "rm -f \"$_filter_file\" \"$_sort_file\" \"$_subagents_file\"" EXIT
 result=$(
   "$SELF" --list all desc no | fzf \
     --ansi \
+    --no-sort \
     --delimiter=$'\t' \
     --with-nth=1 \
     --nth=1 \
