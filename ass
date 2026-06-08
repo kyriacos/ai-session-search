@@ -9,6 +9,7 @@
 #   F1     Claude Code sessions only
 #   F2     Cursor sessions only
 #   F3     all sessions
+#   F4     toggle date sort (↓ newest first / ↑ oldest first)
 #   F5     resume selected session
 #   Ctrl-C cancel
 #
@@ -37,6 +38,7 @@ KEYS (in picker)
   F1                   Claude Code sessions only
   F2                   Cursor sessions only
   F3                   all sessions (reset filter)
+  F4                   toggle date sort (↓ newest first / ↑ oldest first)
   F5                   resume selected session
   Ctrl-C               cancel
 
@@ -76,15 +78,27 @@ CURSOR_DB="${CURSOR_GLOBALSTATE_DB:-$_cursor_default}"
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 _header() {
-  local filter="${1:-all}"
-  local f1 f2 f3
+  local filter="${1:-all}" sort="${2:-desc}"
+  local f1 f2 f3 f4
   case "$filter" in
     claude) f1=$'\033[1;36mF1:claude\033[0m' f2=$'F2:cursor' f3=$'F3:all' ;;
     cursor) f1=$'F1:claude' f2=$'\033[1;33mF2:cursor\033[0m' f3=$'F3:all' ;;
     *)      f1=$'F1:claude' f2=$'F2:cursor' f3=$'\033[1mF3:all\033[0m' ;;
   esac
-  echo "  AI Session Search  ${f1}  ${f2}  ${f3}  |  F5:resume  |  Ctrl-C:cancel"
+  if [[ "$sort" == "asc" ]]; then
+    f4=$'\033[1;32mF4:date↑\033[0m'
+  else
+    f4=$'\033[1;32mF4:date↓\033[0m'
+  fi
+  echo "  AI Session Search  ${f1}  ${f2}  ${f3}  ${f4}  |  F5:resume  |  Ctrl-C:cancel"
 }
+
+# ── header mode ───────────────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "--header" ]]; then
+  _header "${2:-all}" "${3:-desc}"
+  exit 0
+fi
 
 # ── preview mode ──────────────────────────────────────────────────────────────
 
@@ -240,8 +254,9 @@ fi
 
 if [[ "${1:-}" == "--list" ]]; then
   source_filter="${2:-all}"
+  sort_order="${3:-desc}"
 
-  python3 - "$CLAUDE_DIR" "$CURSOR_DB" "$source_filter" "$HOME" <<'PYEOF'
+  python3 - "$CLAUDE_DIR" "$CURSOR_DB" "$source_filter" "$HOME" "$sort_order" <<'PYEOF'
 import sys, json, sqlite3, os, pathlib, shutil
 from datetime import datetime
 
@@ -249,6 +264,7 @@ claude_dir    = pathlib.Path(sys.argv[1])
 cursor_db     = sys.argv[2]
 source_filter = sys.argv[3]
 home          = sys.argv[4]
+sort_order    = sys.argv[5] if len(sys.argv) > 5 else "desc"
 
 RESET  = "\033[0m"
 CYAN   = "\033[36m"
@@ -269,6 +285,8 @@ rows = []
 # ── Claude Code ───────────────────────────────────────────────────────────────
 if source_filter in ("all", "claude") and claude_dir.exists():
     for f in claude_dir.rglob("*.jsonl"):
+        if f.parent.name == "subagents":
+            continue
         project   = project_label(f.parent.name)
         first_msg = ""
         branch    = ""
@@ -302,7 +320,7 @@ if source_filter in ("all", "claude") and claude_dir.exists():
         date  = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
         label = project + (f"  [{branch}]" if branch else "")
         rows.append((mtime,
-            f"{DIM}{date}{RESET}\t{CYAN}claude{RESET}  {GREEN}{label}{RESET}\t{first_msg}\t{f}"))
+            f"{DIM}{date}{RESET}\t{CYAN}claude{RESET}\t{GREEN}{label}{RESET}\t{first_msg}\t{f}"))
 
 # ── Cursor ────────────────────────────────────────────────────────────────────
 if source_filter in ("all", "cursor") and cursor_db and os.path.exists(cursor_db):
@@ -339,14 +357,14 @@ if source_filter in ("all", "cursor") and cursor_db and os.path.exists(cursor_db
                 date  = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M") if mtime else "unknown"
 
                 rows.append((mtime,
-                    f"{DIM}{date}{RESET}\t{YELLOW}cursor{RESET}  {GREEN}{project}{RESET}\t{summary}\tcursor:{cid}:{path}"))
+                    f"{DIM}{date}{RESET}\t{YELLOW}cursor{RESET}\t{GREEN}{project}{RESET}\t{summary}\tcursor:{cid}:{path}"))
     except Exception:
         pass
 
 if not rows:
     print("  (no sessions found)", flush=True)
 
-rows.sort(key=lambda x: x[0], reverse=True)
+rows.sort(key=lambda x: x[0], reverse=(sort_order == "desc"))
 for _, line in rows:
     print(line)
 PYEOF
@@ -377,24 +395,31 @@ fi
 # ── fzf picker ────────────────────────────────────────────────────────────────
 # F5 signals resume via become(echo RESUME:{4}) so that after fzf exits the
 # main shell — which owns the real TTY — can hand off to claude or cursor.
+# F4 toggles sort order; state is tracked in temp files so filter and sort
+# compose correctly across all key bindings.
 
-header_all=$(_header all)
+_filter_file=$(mktemp)
+_sort_file=$(mktemp)
+echo "all"  > "$_filter_file"
+echo "desc" > "$_sort_file"
+trap "rm -f \"$_filter_file\" \"$_sort_file\"" EXIT
 
 result=$(
-  "$SELF" --list all | fzf \
+  "$SELF" --list all desc | fzf \
     --ansi \
     --delimiter=$'\t' \
-    --with-nth=1,2,3 \
-    --preview="\"$SELF\" --preview {4}" \
+    --with-nth=1,2,3,4 \
+    --preview="\"$SELF\" --preview {5}" \
     --preview-window='right:55%:wrap' \
     --height=90% \
     --layout=reverse \
-    --header="$header_all" \
+    --header="$(_header all desc)" \
     --color='header:italic,hl:yellow,hl+:yellow' \
-    --bind="f1:reload(\"$SELF\" --list claude)+change-header($(_header claude))" \
-    --bind="f2:reload(\"$SELF\" --list cursor)+change-header($(_header cursor))" \
-    --bind="f3:reload(\"$SELF\" --list all)+change-header($(_header all))" \
-    --bind='f5:become(echo RESUME:{4})'
+    --bind="f1:execute-silent(echo claude > \"$_filter_file\")+reload(\"$SELF\" --list claude \$(cat \"$_sort_file\"))+transform-header(\"$SELF\" --header claude \$(cat \"$_sort_file\"))" \
+    --bind="f2:execute-silent(echo cursor > \"$_filter_file\")+reload(\"$SELF\" --list cursor \$(cat \"$_sort_file\"))+transform-header(\"$SELF\" --header cursor \$(cat \"$_sort_file\"))" \
+    --bind="f3:execute-silent(echo all > \"$_filter_file\")+reload(\"$SELF\" --list all \$(cat \"$_sort_file\"))+transform-header(\"$SELF\" --header all \$(cat \"$_sort_file\"))" \
+    --bind="f4:execute-silent(s=\$(cat \"$_sort_file\"); [ \"\$s\" = desc ] && echo asc > \"$_sort_file\" || echo desc > \"$_sort_file\")+reload(\"$SELF\" --list \$(cat \"$_filter_file\") \$(cat \"$_sort_file\"))+transform-header(\"$SELF\" --header \$(cat \"$_filter_file\") \$(cat \"$_sort_file\"))" \
+    --bind='f5:become(echo RESUME:{5})'
 ) || exit 0
 
 [[ -z "$result" ]] && exit 0
@@ -402,5 +427,5 @@ result=$(
 if [[ "$result" == RESUME:* ]]; then
   "$SELF" --resume "${result#RESUME:}"
 else
-  echo "$result" | cut -f4
+  echo "$result" | cut -f5
 fi
