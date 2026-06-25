@@ -12,7 +12,8 @@ Fuzzy-search your local AI chat history across **Claude Code** and **Cursor** fr
 | [bat](https://github.com/sharkdp/bat) | Code block syntax highlighting | `brew install bat` |
 | Python 3 | Session parsing (stdlib only) | ships with macOS / most Linux |
 | [Claude Code](https://claude.ai/code) | Claude sessions + `claude --resume` | `npm i -g @anthropic-ai/claude-code` |
-| [Cursor](https://cursor.com) | Cursor sessions + `cursor --reuse-window` | download from cursor.com |
+| [Cursor](https://cursor.com) | Cursor sessions + resume via GUI or CLI | download from cursor.com |
+| [Cursor Agent CLI](https://cursor.com/docs/cli) | `agent --resume` for terminal sessions | ships with Cursor or `curl ... \| bash` |
 
 **Supported OS:** macOS and Linux. Windows is not supported.
 
@@ -61,13 +62,17 @@ Opens the picker. Sessions are sorted newest-first and colour-coded by source:
 | `F2` | Show Cursor sessions only |
 | `F3` | Show all sessions (reset filter) |
 | `F5` | Resume selected session |
+| `F6` | Toggle Cursor resume target (GUI `cursor` / CLI `agent`) |
 | `Enter` | Print session identifier to stdout |
 | `Ctrl-C` | Cancel |
 
 **F5 resume behaviour:**
 
 - Claude Code → runs `claude --resume <uuid>` in the current terminal
-- Cursor → runs `cursor --reuse-window <workspace-path>` (opens the GUI)
+- Cursor (GUI, default) → runs `cursor --reuse-window <workspace-path>`
+- Cursor (agent) → runs `agent --resume <composerId> --workspace <workspace-path>` in the current terminal
+
+Press **F6** in the picker to toggle between GUI and agent mode before resuming a Cursor session.
 
 ### Scripting
 
@@ -113,6 +118,7 @@ The script merges both sources, sorts by modification time, and feeds the result
 |----------|---------|-------------|
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Override Claude session directory |
 | `CURSOR_GLOBALSTATE_DB` | OS default (see above) | Override Cursor DB path |
+| `CURSOR_LAUNCH_MODE` | `gui` | Default Cursor resume target: `gui` or `agent` |
 
 ---
 
@@ -129,6 +135,7 @@ The Cursor identifier encodes the workspace path after the second `:`. On macOS 
 
 ## Known limitations
 
-- **Cursor resume** opens the project folder (`cursor --reuse-window <path>`); there is no CLI to jump to a specific chat session.
+- **Cursor resume (GUI)** opens the project folder (`cursor --reuse-window <path>`); there is no CLI to jump to a specific chat session in the GUI.
+- **Cursor resume (agent)** resumes the chat in the terminal via `agent --resume <composerId>`.
 - **Zed** — the `threads.db` schema exists but sessions are stored as blobs in an undocumented format. Support can be added once the format is confirmed.
 - **Windows** — paths and the Cursor DB location would need adaptation; WSL is untested.
