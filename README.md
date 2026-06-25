@@ -1,6 +1,6 @@
 # ass — AI Session Search
 
-Fuzzy-search your local AI chat history across **Claude Code** and **Cursor** from the terminal. Preview conversations with syntax-highlighted code blocks, filter by tool, and resume sessions with a single keypress.
+Fuzzy-search your local AI chat history across **Claude Code** and **Cursor** from the terminal. Preview conversations with syntax-highlighted code blocks, search by project or message, filter by tool, and resume sessions with a single keypress.
 
 ---
 
@@ -60,9 +60,13 @@ Opens the picker. Sessions are sorted newest-first and colour-coded by source:
 |-----|--------|
 | `F1` | Show Claude Code sessions only |
 | `F2` | Show Cursor sessions only |
-| `F3` | Show all sessions (reset filter) |
+| `F3` | Show all sessions (reset source filter) |
+| `F4` | Toggle date sort (newest / oldest first) |
 | `F5` | Resume selected session |
 | `F6` | Toggle Cursor resume target (GUI `cursor` / CLI `agent`) |
+| `F7` | Filter by project or branch (prompt) |
+| `F8` | Clear project/branch filter |
+| `F10` | Toggle subagent sessions (hidden by default) |
 | `Enter` | Print session identifier to stdout |
 | `Ctrl-C` | Cancel |
 
@@ -73,6 +77,23 @@ Opens the picker. Sessions are sorted newest-first and colour-coded by source:
 - Cursor (agent) → runs `agent --resume <composerId> --workspace <workspace-path>` in the current terminal
 
 Press **F6** in the picker to toggle between GUI and agent mode before resuming a Cursor session.
+
+### How search works
+
+`ass` loads **all sessions on your machine** (not just the current directory) from Claude's `~/.claude/projects` and Cursor's database.
+
+| Input | What it does |
+|-------|----------------|
+| **Search box** | Matches project name, git branch, and message text. Type multiple words to narrow further (e.g. `ai-session resume`). |
+| **F7** | Lock the list to a project or branch — prompts on a separate line, then the search box is free for message text. |
+| **F8** | Clear the F7 lock. |
+| **F1 / F2 / F3** | Show Claude only, Cursor only, or both. |
+
+### Project / branch filter (F7)
+
+Press **F7** — you'll get a simple prompt below the picker (`Filter> `). Type a project or branch name and press Enter. The list reloads to matching sessions only, and the header shows `filter:…`. Press **F8** to clear.
+
+While locked, use the search box to find specific messages within that project.
 
 ### Scripting
 
@@ -108,7 +129,7 @@ Each line is a JSON event; messages live at `obj.message.role` / `obj.message.co
 
 Conversations are keyed as `composerData:<composerId>` and individual messages as `bubbleId:<composerId>:<bubbleId>` in the `cursorDiskKV` table.
 
-The script merges both sources, sorts by modification time, and feeds the result into `fzf`. The preview panel extracts fenced code blocks and pipes each through `bat` for per-language syntax highlighting.
+The script merges both sources, sorts by modification time, and feeds the result into `fzf`. Each row carries a hidden plain-text search field (project, branch, message) so the search box matches real content rather than ANSI-coloured display text. The preview panel extracts fenced code blocks and pipes each through `bat` for per-language syntax highlighting.
 
 ---
 

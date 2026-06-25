@@ -12,6 +12,8 @@
 #   F4     toggle date sort (↓ newest first / ↑ oldest first)
 #   F5     resume selected session
 #   F6     toggle Cursor resume target (gui cursor / cli agent)
+#   F7     open project/branch filter prompt
+#   F8     clear project/branch filter
 #   F10    toggle subagent sessions (hidden by default)
 #   Ctrl-C cancel
 #
@@ -40,10 +42,12 @@ KEYS (in picker)
   Enter                print session identifier to stdout
   F1                   Claude Code sessions only
   F2                   Cursor sessions only
-  F3                   all sessions (reset filter)
+  F3                   all sessions (reset source filter)
   F4                   toggle date sort (↓ newest first / ↑ oldest first)
   F5                   resume selected session
   F6                   toggle Cursor resume target (gui / agent)
+  F7                   filter by project/branch (prompt)
+  F8                   clear project/branch filter
   F10                  toggle subagent sessions (hidden by default)
   Ctrl-C               cancel
 
@@ -85,8 +89,8 @@ CURSOR_DB="${CURSOR_GLOBALSTATE_DB:-$_cursor_default}"
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 _header() {
-  local filter="${1:-all}" sort="${2:-desc}" subagents="${3:-no}" cursor_launch="${4:-gui}"
-  local f1 f2 f3 f4 f6 f10
+  local filter="${1:-all}" sort="${2:-desc}" subagents="${3:-no}" cursor_launch="${4:-gui}" proj_filter="${5:-}"
+  local f1 f2 f3 f4 f6 f7f8 f10
   case "$filter" in
     claude) f1=$'\033[1;36mF1:claude\033[0m' f2=$'F2:cursor' f3=$'F3:all' ;;
     cursor) f1=$'F1:claude' f2=$'\033[1;33mF2:cursor\033[0m' f3=$'F3:all' ;;
@@ -102,18 +106,39 @@ _header() {
   else
     f6=$'\033[2mF6:gui\033[0m'
   fi
+  if [[ -n "$proj_filter" ]]; then
+    local shown="$proj_filter"
+    [[ ${#shown} -gt 24 ]] && shown="${shown:0:23}…"
+    f7f8=$'\033[1;32mfilter:'"$shown"$'\033[0m '"F8:clear"
+  else
+    f7f8=$'F7:filter  F8:clear'
+  fi
   if [[ "$subagents" == "yes" ]]; then
     f10=$'\033[1;32mF10:+sub\033[0m'
   else
     f10=$'\033[2mF10:+sub\033[0m'
   fi
-  echo "  AI Session Search  ${f1}  ${f2}  ${f3}  ${f4}  ${f6}  ${f10}  |  F5:resume  |  Ctrl-C:cancel"
+  echo "  AI Session Search  ${f1}  ${f2}  ${f3}  ${f4}  ${f6}  ${f10}  |  ${f7f8}  |  F5:resume  |  Ctrl-C:cancel"
 }
 
 # ── header mode ───────────────────────────────────────────────────────────────
 
 if [[ "${1:-}" == "--header" ]]; then
-  _header "${2:-all}" "${3:-desc}" "${4:-no}" "${5:-gui}"
+  _header "${2:-all}" "${3:-desc}" "${4:-no}" "${5:-gui}" "${ASS_PROJ_FILTER:-}"
+  exit 0
+fi
+
+# ── project filter prompt ─────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "--prompt-filter" ]]; then
+  outfile="${2:?}"
+  current=""
+  [[ -s "$outfile" ]] && current="$(cat "$outfile")"
+  printf '%s\n' "Current: ${current:-(none)}" "Enter project or branch name. Empty line clears."
+  if ! IFS= read -r -p 'Filter> ' selected </dev/tty; then
+    exit 0
+  fi
+  printf '%s' "$selected" > "$outfile"
   exit 0
 fi
 
@@ -273,8 +298,9 @@ if [[ "${1:-}" == "--list" ]]; then
   source_filter="${2:-all}"
   sort_order="${3:-desc}"
   subagents="${4:-no}"
+  proj_filter="${ASS_PROJ_FILTER:-}"
 
-  python3 - "$CLAUDE_DIR" "$CURSOR_DB" "$source_filter" "$HOME" "$sort_order" "$subagents" <<'PYEOF'
+  python3 - "$CLAUDE_DIR" "$CURSOR_DB" "$source_filter" "$HOME" "$sort_order" "$subagents" "$proj_filter" <<'PYEOF'
 import sys, json, sqlite3, os, pathlib, shutil
 from datetime import datetime
 
@@ -284,6 +310,8 @@ source_filter    = sys.argv[3]
 home             = sys.argv[4]
 sort_order       = sys.argv[5] if len(sys.argv) > 5 else "desc"
 include_subagents = sys.argv[6] if len(sys.argv) > 6 else "no"
+proj_filter      = sys.argv[7] if len(sys.argv) > 7 else ""
+proj_filter_l    = proj_filter.lower()
 
 RESET  = "\033[0m"
 CYAN   = "\033[36m"
@@ -300,6 +328,12 @@ def fixed(text, width):
     if len(text) > width:
         return text[:width - 1] + "…"
     return text.ljust(width)
+
+def matches_proj_filter(project: str, branch: str = "", path: str = "") -> bool:
+    if not proj_filter_l:
+        return True
+    haystack = f"{project} {branch} {path}".lower()
+    return proj_filter_l in haystack
 
 # Claude encodes paths by replacing / and . with -
 encoded_home = home.replace("/", "-").replace(".", "-")
@@ -346,6 +380,9 @@ if source_filter in ("all", "claude") and claude_dir.exists():
         if not first_msg:
             continue
 
+        if not matches_proj_filter(project, branch):
+            continue
+
         mtime     = f.stat().st_mtime
         date_s    = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
         label     = project + (f" [{branch}]" if branch else "")
@@ -355,7 +392,8 @@ if source_filter in ("all", "claude") and claude_dir.exists():
                      f"{CYAN}{fixed('claude', SRC_W)}{RESET}  "
                      f"{GREEN}{fixed(label, PROJ_W)}{RESET}  "
                      f"{first_msg}")
-        rows.append((mtime, f"{display}\t{f}"))
+        search = " ".join(p for p in (project, branch, first_msg) if p).replace("\t", " ")
+        rows.append((mtime, f"{search}\t{display}\t{f}"))
 
 # ── Cursor ────────────────────────────────────────────────────────────────────
 if source_filter in ("all", "cursor") and cursor_db and os.path.exists(cursor_db):
@@ -387,6 +425,9 @@ if source_filter in ("all", "cursor") and cursor_db and os.path.exists(cursor_db
                 path    = uri.get("fsPath", "") or ""
                 project = os.path.basename(path) or "unknown"
 
+                if not matches_proj_filter(project, path=path):
+                    continue
+
                 ts    = d.get("createdAt") or c.get("createdAt") or 0
                 mtime = ts / 1000 if ts else 0
                 date_s = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M") if mtime else "unknown"
@@ -395,7 +436,8 @@ if source_filter in ("all", "cursor") and cursor_db and os.path.exists(cursor_db
                            f"{YELLOW}{fixed('cursor', SRC_W)}{RESET}  "
                            f"{GREEN}{fixed(project, PROJ_W)}{RESET}  "
                            f"{summary}")
-                rows.append((mtime, f"{display}\tcursor:{cid}:{path}"))
+                search = " ".join(p for p in (project, path, summary) if p).replace("\t", " ")
+                rows.append((mtime, f"{search}\t{display}\tcursor:{cid}:{path}"))
     except Exception:
         pass
 
@@ -446,43 +488,50 @@ fi
 # ── fzf picker ────────────────────────────────────────────────────────────────
 # F5 signals resume via become(echo RESUME:{2}) so that after fzf exits the
 # main shell — which owns the real TTY — can hand off to claude or cursor.
-# Each row is: fixed-width-display-string TAB identifier
-# Using --with-nth=1 keeps fzf from touching the hidden identifier column,
-# which means match highlighting only occurs in col 1 and alignment stays stable.
+# Each row is: plain-search TAB fixed-width-display TAB identifier
+# --with-nth=2 shows only the display column; --nth=1 searches plain text only.
 
 _filter_file=$(mktemp)
 _sort_file=$(mktemp)
 _subagents_file=$(mktemp)
 _cursor_launch_file=$(mktemp)
+_proj_filter_file=$(mktemp)
 echo "all"  > "$_filter_file"
 echo "desc" > "$_sort_file"
 echo "no"   > "$_subagents_file"
+: > "$_proj_filter_file"
 case "${CURSOR_LAUNCH_MODE:-gui}" in
   agent) echo "agent" > "$_cursor_launch_file" ;;
   *)     echo "gui"   > "$_cursor_launch_file" ;;
 esac
-trap "rm -f \"$_filter_file\" \"$_sort_file\" \"$_subagents_file\" \"$_cursor_launch_file\"" EXIT
+trap "rm -f \"$_filter_file\" \"$_sort_file\" \"$_subagents_file\" \"$_cursor_launch_file\" \"$_proj_filter_file\"" EXIT
+
+_LIST_RELOAD="ASS_PROJ_FILTER=\$(cat \"$_proj_filter_file\") \"$SELF\" --list \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\")"
+_HEADER_XFORM="ASS_PROJ_FILTER=\$(cat \"$_proj_filter_file\") \"$SELF\" --header \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\") \$(cat \"$_cursor_launch_file\")"
 
 result=$(
-  "$SELF" --list all desc no | fzf \
+  ASS_PROJ_FILTER="$(cat "$_proj_filter_file")" "$SELF" --list all desc no | fzf \
     --ansi \
+    --exact \
     --no-sort \
     --delimiter=$'\t' \
-    --with-nth=1 \
+    --with-nth=2 \
     --nth=1 \
-    --preview="\"$SELF\" --preview {2}" \
+    --preview="\"$SELF\" --preview {3}" \
     --preview-window='right:55%:wrap' \
     --height=90% \
     --layout=reverse \
-    --header="$(_header all desc no "$(cat "$_cursor_launch_file")")" \
+    --header="$(ASS_PROJ_FILTER="$(cat "$_proj_filter_file")" "$SELF" --header all desc no "$(cat "$_cursor_launch_file")")" \
     --color='header:italic,hl:yellow,hl+:yellow' \
-    --bind="f1:execute-silent(echo claude > \"$_filter_file\")+reload(\"$SELF\" --list claude \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\"))+transform-header(\"$SELF\" --header claude \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\") \$(cat \"$_cursor_launch_file\"))" \
-    --bind="f2:execute-silent(echo cursor > \"$_filter_file\")+reload(\"$SELF\" --list cursor \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\"))+transform-header(\"$SELF\" --header cursor \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\") \$(cat \"$_cursor_launch_file\"))" \
-    --bind="f3:execute-silent(echo all > \"$_filter_file\")+reload(\"$SELF\" --list all \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\"))+transform-header(\"$SELF\" --header all \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\") \$(cat \"$_cursor_launch_file\"))" \
-    --bind="f4:execute-silent(s=\$(cat \"$_sort_file\"); [ \"\$s\" = desc ] && echo asc > \"$_sort_file\" || echo desc > \"$_sort_file\")+reload(\"$SELF\" --list \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\"))+transform-header(\"$SELF\" --header \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\") \$(cat \"$_cursor_launch_file\"))" \
-    --bind="f6:execute-silent(m=\$(cat \"$_cursor_launch_file\"); [ \"\$m\" = gui ] && echo agent > \"$_cursor_launch_file\" || echo gui > \"$_cursor_launch_file\")+transform-header(\"$SELF\" --header \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\") \$(cat \"$_cursor_launch_file\"))" \
-    --bind="f10:execute-silent(s=\$(cat \"$_subagents_file\"); [ \"\$s\" = no ] && echo yes > \"$_subagents_file\" || echo no > \"$_subagents_file\")+reload(\"$SELF\" --list \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\"))+transform-header(\"$SELF\" --header \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\") \$(cat \"$_cursor_launch_file\"))" \
-    --bind='f5:become(echo RESUME:{2})'
+    --bind="f1:execute-silent(echo claude > \"$_filter_file\")+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
+    --bind="f2:execute-silent(echo cursor > \"$_filter_file\")+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
+    --bind="f3:execute-silent(echo all > \"$_filter_file\")+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
+    --bind="f4:execute-silent(s=\$(cat \"$_sort_file\"); [ \"\$s\" = desc ] && echo asc > \"$_sort_file\" || echo desc > \"$_sort_file\")+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
+    --bind="f6:execute-silent(m=\$(cat \"$_cursor_launch_file\"); [ \"\$m\" = gui ] && echo agent > \"$_cursor_launch_file\" || echo gui > \"$_cursor_launch_file\")+transform-header($_HEADER_XFORM)" \
+    --bind="f7:execute(\"$SELF\" --prompt-filter \"$_proj_filter_file\")+change-query()+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
+    --bind="f8:execute-silent(: > \"$_proj_filter_file\")+change-query()+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
+    --bind="f10:execute-silent(s=\$(cat \"$_subagents_file\"); [ \"\$s\" = no ] && echo yes > \"$_subagents_file\" || echo no > \"$_subagents_file\")+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
+    --bind='f5:become(echo RESUME:{3})'
 ) || exit 0
 
 [[ -z "$result" ]] && exit 0
@@ -490,5 +539,5 @@ result=$(
 if [[ "$result" == RESUME:* ]]; then
   "$SELF" --resume "${result#RESUME:}" "$(cat "$_cursor_launch_file")"
 else
-  echo "$result" | cut -f2
+  echo "$result" | cut -f3
 fi
