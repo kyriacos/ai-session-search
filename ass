@@ -14,6 +14,7 @@
 #   F6     toggle Cursor resume target (gui cursor / cli agent)
 #   F7     open project/branch filter prompt
 #   F8     clear project/branch filter
+#   F9     toggle full-conversation search (off by default)
 #   F10    toggle subagent sessions (hidden by default)
 #   Ctrl-C cancel
 #
@@ -25,6 +26,7 @@
 #   CLAUDE_PROJECTS_DIR      override ~/.claude/projects
 #   CURSOR_GLOBALSTATE_DB    override platform-default Cursor DB path
 #   CURSOR_LAUNCH_MODE       Cursor resume target: gui (default) or agent
+#   ASS_EXTENDED_SEARCH      start with full-conversation search (1/yes/true)
 
 set -uo pipefail
 
@@ -48,6 +50,7 @@ KEYS (in picker)
   F6                   toggle Cursor resume target (gui / agent)
   F7                   filter by project/branch (prompt)
   F8                   clear project/branch filter
+  F9                   toggle full-conversation search (off by default)
   F10                  toggle subagent sessions (hidden by default)
   Ctrl-C               cancel
 
@@ -64,6 +67,7 @@ ENVIRONMENT
   CLAUDE_PROJECTS_DIR     override ~/.claude/projects
   CURSOR_GLOBALSTATE_DB   override platform-default Cursor DB path
   CURSOR_LAUNCH_MODE      Cursor resume target: gui (default) or agent
+  ASS_EXTENDED_SEARCH     start with full-conversation search on (1/yes/true)
 
 REQUIREMENTS
   fzf >= 0.45   brew install fzf
@@ -89,8 +93,8 @@ CURSOR_DB="${CURSOR_GLOBALSTATE_DB:-$_cursor_default}"
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 _header() {
-  local filter="${1:-all}" sort="${2:-desc}" subagents="${3:-no}" cursor_launch="${4:-gui}" proj_filter="${5:-}"
-  local f1 f2 f3 f4 f6 f7f8 f10
+  local filter="${1:-all}" sort="${2:-desc}" subagents="${3:-no}" cursor_launch="${4:-gui}" proj_filter="${5:-}" extended="${6:-no}"
+  local f1 f2 f3 f4 f6 f7f8 f9 f10
   case "$filter" in
     claude) f1=$'\033[1;36mF1:claude\033[0m' f2=$'F2:cursor' f3=$'F3:all' ;;
     cursor) f1=$'F1:claude' f2=$'\033[1;33mF2:cursor\033[0m' f3=$'F3:all' ;;
@@ -113,18 +117,23 @@ _header() {
   else
     f7f8=$'F7:filter  F8:clear'
   fi
+  if [[ "$extended" == "yes" ]]; then
+    f9=$'\033[1;32mF9:+full\033[0m'
+  else
+    f9=$'\033[2mF9:full\033[0m'
+  fi
   if [[ "$subagents" == "yes" ]]; then
     f10=$'\033[1;32mF10:+sub\033[0m'
   else
     f10=$'\033[2mF10:+sub\033[0m'
   fi
-  echo "  AI Session Search  ${f1}  ${f2}  ${f3}  ${f4}  ${f6}  ${f10}  |  ${f7f8}  |  F5:resume  |  Ctrl-C:cancel"
+  echo "  AI Session Search  ${f1}  ${f2}  ${f3}  ${f4}  ${f6}  ${f9}  ${f10}  |  ${f7f8}  |  F5:resume  |  Ctrl-C:cancel"
 }
 
 # ── header mode ───────────────────────────────────────────────────────────────
 
 if [[ "${1:-}" == "--header" ]]; then
-  _header "${2:-all}" "${3:-desc}" "${4:-no}" "${5:-gui}" "${ASS_PROJ_FILTER:-}"
+  _header "${2:-all}" "${3:-desc}" "${4:-no}" "${5:-gui}" "${ASS_PROJ_FILTER:-}" "${6:-no}"
   exit 0
 fi
 
@@ -298,9 +307,10 @@ if [[ "${1:-}" == "--list" ]]; then
   source_filter="${2:-all}"
   sort_order="${3:-desc}"
   subagents="${4:-no}"
+  extended_search="${5:-no}"
   proj_filter="${ASS_PROJ_FILTER:-}"
 
-  python3 - "$CLAUDE_DIR" "$CURSOR_DB" "$source_filter" "$HOME" "$sort_order" "$subagents" "$proj_filter" <<'PYEOF'
+  python3 - "$CLAUDE_DIR" "$CURSOR_DB" "$source_filter" "$HOME" "$sort_order" "$subagents" "$proj_filter" "$extended_search" <<'PYEOF'
 import sys, json, sqlite3, os, pathlib, shutil
 from datetime import datetime
 
@@ -311,13 +321,18 @@ home             = sys.argv[4]
 sort_order       = sys.argv[5] if len(sys.argv) > 5 else "desc"
 include_subagents = sys.argv[6] if len(sys.argv) > 6 else "no"
 proj_filter      = sys.argv[7] if len(sys.argv) > 7 else ""
+extended_search  = sys.argv[8] if len(sys.argv) > 8 else "no"
 proj_filter_l    = proj_filter.lower()
+
+SEARCH_TEXT_MAX = 131072
 
 RESET  = "\033[0m"
 CYAN   = "\033[36m"
 YELLOW = "\033[33m"
 GREEN  = "\033[32m"
 DIM    = "\033[2m"
+HIDE   = "\033[8m"
+HIDE_END = "\033[0m"
 
 DATE_W = 16
 SRC_W  = 6
@@ -335,6 +350,138 @@ def matches_proj_filter(project: str, branch: str = "", path: str = "") -> bool:
     haystack = f"{project} {branch} {path}".lower()
     return proj_filter_l in haystack
 
+def normalize_search_text(text: str) -> str:
+    return text.replace("\n", " ").replace("\t", " ").strip()
+
+def cap_search_text(text: str) -> str:
+    if len(text) > SEARCH_TEXT_MAX:
+        return text[:SEARCH_TEXT_MAX]
+    return text
+
+def flatten_message_content(content, role: str = "") -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                parts.append(block.get("text", ""))
+            elif btype == "tool_result" and role == "user":
+                inner = block.get("content", "")
+                if isinstance(inner, str):
+                    parts.append(inner)
+        return "\n".join(p for p in parts if p).strip()
+    return ""
+
+def make_row(display: str, search: str, identifier: str) -> str:
+    plain = search.replace("\t", " ").strip()
+    return f"{display}{HIDE} {plain}{HIDE_END}\t{identifier}"
+
+def parse_claude_session(fpath):
+    first_short = ""
+    first_full = ""
+    branch = ""
+    conv_parts = []
+    try:
+        with open(fpath, errors="replace") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if not branch:
+                        branch = obj.get("gitBranch", "")
+                    msg = obj.get("message")
+                    if not isinstance(msg, dict):
+                        continue
+                    role = msg.get("role", "")
+                    if role not in ("user", "assistant"):
+                        continue
+                    text = flatten_message_content(msg.get("content", ""), role)
+                    if not text:
+                        continue
+                    norm = normalize_search_text(text)
+                    if role == "user" and not first_full:
+                        first_short = norm[:120]
+                        first_full = norm
+                    if extended_search == "yes":
+                        conv_parts.append(norm)
+                    elif first_full:
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    conv_text = cap_search_text(" ".join(conv_parts)) if conv_parts else ""
+    return branch, first_short, first_full, conv_text
+
+def cursor_bubble_search_parts(bubble):
+    """Index conversation text only — not tool result payloads (whole files)."""
+    parts = []
+    text = (bubble.get("text") or "").strip()
+    if text:
+        parts.append(normalize_search_text(text))
+    thinking = bubble.get("thinking")
+    if isinstance(thinking, dict):
+        t = (thinking.get("text") or "").strip()
+        if t:
+            parts.append(normalize_search_text(t))
+    tfd = bubble.get("toolFormerData")
+    if isinstance(tfd, dict):
+        name = tfd.get("name")
+        if isinstance(name, str) and name.strip():
+            parts.append(normalize_search_text(name))
+        raw = tfd.get("rawArgs")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                args = json.loads(raw)
+                if isinstance(args, dict):
+                    for key in ("path", "query", "pattern", "command", "search_term", "url"):
+                        val = args.get(key)
+                        if isinstance(val, str) and val.strip():
+                            parts.append(normalize_search_text(val))
+            except json.JSONDecodeError:
+                pass
+    return parts
+
+def cursor_first_user_text(conn, composer_id, data):
+    for h in data.get("fullConversationHeadersOnly", []):
+        if h.get("type") != 1:
+            continue
+        bid = h.get("bubbleId")
+        if not bid:
+            continue
+        br = conn.execute(
+            "SELECT value FROM cursorDiskKV WHERE key = ?",
+            (f"bubbleId:{composer_id}:{bid}",)
+        ).fetchone()
+        if not br or br[0] is None:
+            continue
+        parts = cursor_bubble_search_parts(json.loads(br[0]))
+        if parts:
+            return " ".join(parts)
+    return ""
+
+def cursor_bubble_texts(conn, composer_id, data):
+    texts = []
+    for h in data.get("fullConversationHeadersOnly", []):
+        if h.get("type") not in (1, 2):
+            continue
+        bid = h.get("bubbleId")
+        if not bid:
+            continue
+        br = conn.execute(
+            "SELECT value FROM cursorDiskKV WHERE key = ?",
+            (f"bubbleId:{composer_id}:{bid}",)
+        ).fetchone()
+        if not br or br[0] is None:
+            continue
+        texts.extend(cursor_bubble_search_parts(json.loads(br[0])))
+    return texts
+
 # Claude encodes paths by replacing / and . with -
 encoded_home = home.replace("/", "-").replace(".", "-")
 
@@ -351,38 +498,16 @@ if source_filter in ("all", "claude") and claude_dir.exists():
         is_subagent = f.parent.name == "subagents"
         if is_subagent and include_subagents != "yes":
             continue
-        project   = project_label(f.parent.name if not is_subagent else f.parent.parent.name)
-        first_msg = ""
-        branch    = ""
-        try:
-            with open(f, errors="replace") as fh:
-                for line in fh:
-                    if not line.strip():
-                        continue
-                    try:
-                        obj = json.loads(line)
-                        if not branch:
-                            branch = obj.get("gitBranch", "")
-                        msg = obj.get("message")
-                        if not isinstance(msg, dict) or msg.get("role") != "user":
-                            continue
-                        content = msg.get("content", "")
-                        if isinstance(content, list):
-                            continue
-                        if isinstance(content, str) and content.strip():
-                            first_msg = content.strip()[:120].replace("\n", " ").replace("\t", " ")
-                            break
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-
-        if not first_msg:
+        project = project_label(f.parent.name if not is_subagent else f.parent.parent.name)
+        branch, first_short, first_full, conv_text = parse_claude_session(f)
+        snippet = first_short or (conv_text[:120] if conv_text else "")
+        if not snippet:
             continue
 
         if not matches_proj_filter(project, branch):
             continue
 
+        search_body = conv_text if extended_search == "yes" and conv_text else first_full
         mtime     = f.stat().st_mtime
         date_s    = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
         label     = project + (f" [{branch}]" if branch else "")
@@ -391,9 +516,9 @@ if source_filter in ("all", "claude") and claude_dir.exists():
         display   = (f"{DIM}{fixed(date_s, DATE_W)}{RESET}  "
                      f"{CYAN}{fixed('claude', SRC_W)}{RESET}  "
                      f"{GREEN}{fixed(label, PROJ_W)}{RESET}  "
-                     f"{first_msg}")
-        search = " ".join(p for p in (project, branch, first_msg) if p).replace("\t", " ")
-        rows.append((mtime, f"{search}\t{display}\t{f}"))
+                     f"{snippet}")
+        search = " ".join(p for p in (project, branch, search_body) if p)
+        rows.append((mtime, make_row(display, search, str(f))))
 
 # ── Cursor ────────────────────────────────────────────────────────────────────
 if source_filter in ("all", "cursor") and cursor_db and os.path.exists(cursor_db):
@@ -420,6 +545,11 @@ if source_filter in ("all", "cursor") and cursor_db and os.path.exists(cursor_db
                     continue
                 summary = summary[:120].replace("\n", " ").replace("\t", " ")
 
+                first_user = cursor_first_user_text(conn, cid, d)
+                conv_text = ""
+                if extended_search == "yes":
+                    conv_text = cap_search_text(" ".join(cursor_bubble_texts(conn, cid, d)))
+
                 ws      = d.get("workspaceIdentifier") or {}
                 uri     = ws.get("uri") or {}
                 path    = uri.get("fsPath", "") or ""
@@ -432,12 +562,20 @@ if source_filter in ("all", "cursor") and cursor_db and os.path.exists(cursor_db
                 mtime = ts / 1000 if ts else 0
                 date_s = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M") if mtime else "unknown"
 
+                snippet = (first_user[:120] if first_user else summary)
                 display = (f"{DIM}{fixed(date_s, DATE_W)}{RESET}  "
                            f"{YELLOW}{fixed('cursor', SRC_W)}{RESET}  "
                            f"{GREEN}{fixed(project, PROJ_W)}{RESET}  "
-                           f"{summary}")
-                search = " ".join(p for p in (project, path, summary) if p).replace("\t", " ")
-                rows.append((mtime, f"{search}\t{display}\tcursor:{cid}:{path}"))
+                           f"{snippet}")
+                if conv_text:
+                    search_body = conv_text
+                elif first_user:
+                    search_body = first_user
+                else:
+                    search_body = summary
+                search = " ".join(p for p in (project, path, search_body) if p)
+                ident = f"cursor:{cid}:{path}"
+                rows.append((mtime, make_row(display, search, ident)))
     except Exception:
         pass
 
@@ -488,40 +626,46 @@ fi
 # ── fzf picker ────────────────────────────────────────────────────────────────
 # F5 signals resume via become(echo RESUME:{2}) so that after fzf exits the
 # main shell — which owns the real TTY — can hand off to claude or cursor.
-# Each row is: plain-search TAB fixed-width-display TAB identifier
-# --with-nth=2 shows only the display column; --nth=1 searches plain text only.
+# Each row is: display-with-hidden-search TAB identifier
+# Search text is appended invisibly (ANSI conceal) so fzf can match it in column 1.
 
 _filter_file=$(mktemp)
 _sort_file=$(mktemp)
 _subagents_file=$(mktemp)
+_extended_file=$(mktemp)
 _cursor_launch_file=$(mktemp)
 _proj_filter_file=$(mktemp)
 echo "all"  > "$_filter_file"
 echo "desc" > "$_sort_file"
 echo "no"   > "$_subagents_file"
+case "${ASS_EXTENDED_SEARCH:-}" in
+  1|yes|true|TRUE|on|ON) echo "yes" > "$_extended_file" ;;
+  *)                      echo "no"  > "$_extended_file" ;;
+esac
 : > "$_proj_filter_file"
 case "${CURSOR_LAUNCH_MODE:-gui}" in
   agent) echo "agent" > "$_cursor_launch_file" ;;
   *)     echo "gui"   > "$_cursor_launch_file" ;;
 esac
-trap "rm -f \"$_filter_file\" \"$_sort_file\" \"$_subagents_file\" \"$_cursor_launch_file\" \"$_proj_filter_file\"" EXIT
+trap "rm -f \"$_filter_file\" \"$_sort_file\" \"$_subagents_file\" \"$_extended_file\" \"$_cursor_launch_file\" \"$_proj_filter_file\"" EXIT
 
-_LIST_RELOAD="ASS_PROJ_FILTER=\$(cat \"$_proj_filter_file\") \"$SELF\" --list \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\")"
-_HEADER_XFORM="ASS_PROJ_FILTER=\$(cat \"$_proj_filter_file\") \"$SELF\" --header \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\") \$(cat \"$_cursor_launch_file\")"
+_LIST_RELOAD="ASS_PROJ_FILTER=\$(cat \"$_proj_filter_file\") \"$SELF\" --list \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\") \$(cat \"$_extended_file\")"
+_HEADER_XFORM="ASS_PROJ_FILTER=\$(cat \"$_proj_filter_file\") \"$SELF\" --header \$(cat \"$_filter_file\") \$(cat \"$_sort_file\") \$(cat \"$_subagents_file\") \$(cat \"$_cursor_launch_file\") \$(cat \"$_extended_file\")"
+_TOGGLE_FULL="s=\$(cat \"$_extended_file\"); [ \"\$s\" = no ] && echo yes > \"$_extended_file\" || echo no > \"$_extended_file\""
 
 result=$(
-  ASS_PROJ_FILTER="$(cat "$_proj_filter_file")" "$SELF" --list all desc no | fzf \
+  ASS_PROJ_FILTER="$(cat "$_proj_filter_file")" "$SELF" --list all desc no "$(cat "$_extended_file")" | fzf \
     --ansi \
     --exact \
     --no-sort \
     --delimiter=$'\t' \
-    --with-nth=2 \
+    --with-nth=1 \
     --nth=1 \
-    --preview="\"$SELF\" --preview {3}" \
+    --preview="\"$SELF\" --preview {2}" \
     --preview-window='right:55%:wrap' \
     --height=90% \
     --layout=reverse \
-    --header="$(ASS_PROJ_FILTER="$(cat "$_proj_filter_file")" "$SELF" --header all desc no "$(cat "$_cursor_launch_file")")" \
+    --header="$(ASS_PROJ_FILTER="$(cat "$_proj_filter_file")" "$SELF" --header all desc no "$(cat "$_cursor_launch_file")" "$(cat "$_extended_file")")" \
     --color='header:italic,hl:yellow,hl+:yellow' \
     --bind="f1:execute-silent(echo claude > \"$_filter_file\")+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
     --bind="f2:execute-silent(echo cursor > \"$_filter_file\")+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
@@ -530,8 +674,10 @@ result=$(
     --bind="f6:execute-silent(m=\$(cat \"$_cursor_launch_file\"); [ \"\$m\" = gui ] && echo agent > \"$_cursor_launch_file\" || echo gui > \"$_cursor_launch_file\")+transform-header($_HEADER_XFORM)" \
     --bind="f7:execute(\"$SELF\" --prompt-filter \"$_proj_filter_file\")+change-query()+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
     --bind="f8:execute-silent(: > \"$_proj_filter_file\")+change-query()+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
+    --bind="f9:execute-silent($_TOGGLE_FULL)+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
+    --bind="ctrl-y:execute-silent($_TOGGLE_FULL)+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
     --bind="f10:execute-silent(s=\$(cat \"$_subagents_file\"); [ \"\$s\" = no ] && echo yes > \"$_subagents_file\" || echo no > \"$_subagents_file\")+reload($_LIST_RELOAD)+transform-header($_HEADER_XFORM)" \
-    --bind='f5:become(echo RESUME:{3})'
+    --bind='f5:become(echo RESUME:{2})'
 ) || exit 0
 
 [[ -z "$result" ]] && exit 0
@@ -539,5 +685,5 @@ result=$(
 if [[ "$result" == RESUME:* ]]; then
   "$SELF" --resume "${result#RESUME:}" "$(cat "$_cursor_launch_file")"
 else
-  echo "$result" | cut -f3
+  echo "$result" | cut -f2
 fi

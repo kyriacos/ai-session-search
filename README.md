@@ -66,6 +66,7 @@ Opens the picker. Sessions are sorted newest-first and colour-coded by source:
 | `F6` | Toggle Cursor resume target (GUI `cursor` / CLI `agent`) |
 | `F7` | Filter by project or branch (prompt) |
 | `F8` | Clear project/branch filter |
+| `F9` / `Ctrl-Y` | Toggle full-conversation search (off by default; slower reload) |
 | `F10` | Toggle subagent sessions (hidden by default) |
 | `Enter` | Print session identifier to stdout |
 | `Ctrl-C` | Cancel |
@@ -84,16 +85,27 @@ Press **F6** in the picker to toggle between GUI and agent mode before resuming 
 
 | Input | What it does |
 |-------|----------------|
-| **Search box** | Matches project name, git branch, and message text. Type multiple words to narrow further (e.g. `ai-session resume`). |
+| **Search box** | Substring match on indexed text. Multiple words are **AND**ed — each word must appear somewhere in the session. |
+| **F9** | Index **conversation turns** for search (user/assistant text; not whole files read by tools). Off by default — list reload is slower when on. |
 | **F7** | Lock the list to a project or branch — prompts on a separate line, then the search box is free for message text. |
 | **F8** | Clear the F7 lock. |
 | **F1 / F2 / F3** | Show Claude only, Cursor only, or both. |
+
+By default, search matches the **first user message** plus project metadata (Claude and Cursor). Press **F9** or **Ctrl-Y** (`+full` in the header) to search all turns. Or start with full search on:
+
+```bash
+ASS_EXTENDED_SEARCH=1 ass
+```
+
+Search terms are space-separated **AND** filters — every word must appear somewhere in the session. Type fewer words if results are too narrow.
+
+**After pulling updates**, reinstall so `~/.local/bin/ass` picks up changes: `ln -sf "$(pwd)/ass" ~/.local/bin/ass`
 
 ### Project / branch filter (F7)
 
 Press **F7** — you'll get a simple prompt below the picker (`Filter> `). Type a project or branch name and press Enter. The list reloads to matching sessions only, and the header shows `filter:…`. Press **F8** to clear.
 
-While locked, use the search box to find specific messages within that project.
+While locked, use the search box to find sessions within that project. Combine with **F9** to search full conversation text, not just the opening line.
 
 ### Scripting
 
